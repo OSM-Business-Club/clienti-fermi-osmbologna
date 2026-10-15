@@ -344,6 +344,19 @@
     display: block; width: 100%; margin: 0 0 10px; accent-color: var(--fucsia);
     height: 18px; cursor: pointer;
   }
+  /* Database: filtri e barra orizzontale sempre visibili scorrendo verso il basso */
+  .db-sticky-bar {
+    position: sticky; top: 60px; z-index: 50;
+    background: var(--bg-soft);
+    margin: 0 -16px; padding: 10px 16px 2px;
+    transition: box-shadow 0.2s ease;
+  }
+  .db-sticky-bar .filters-bar { margin-bottom: 10px; }
+  .db-sticky-bar.is-stuck { box-shadow: 0 6px 14px rgba(179,70,141,0.12); border-bottom: 1px solid var(--card-border); }
+  /* Su schermi piccoli i filtri occuperebbero tutto lo schermo: lì restano in cima alla pagina */
+  @media (max-width: 700px) {
+    .db-sticky-bar { position: static; }
+  }
   table { width: 100%; border-collapse: collapse; min-width: 1180px; }
   thead tr { background: var(--fucsia-light); border-bottom: 1px solid var(--fucsia-border); }
   th { padding: 13px 14px; text-align: left; font-size: 0.7rem; font-weight: 800; letter-spacing: 0.07em; text-transform: uppercase; color: var(--fucsia-dark); white-space: nowrap; }
@@ -886,9 +899,17 @@
     padding: 10px 16px; background: var(--fucsia-light);
     border: 1px solid var(--fucsia-border); border-radius: 10px;
     margin-bottom: 12px; display: flex; align-items: center; gap: 10px;
+    cursor: pointer; user-select: none;
   }
+  .riassunto-consulente-title:hover { border-color: var(--fucsia); }
+  .riassunto-freccia { display: inline-block; transition: transform 0.18s ease; }
+  /* Sezione chiusa: resta solo la barra col nome e i totali */
+  .riassunto-consulente-section.chiuso { margin-bottom: 10px; }
+  .riassunto-consulente-section.chiuso .riassunto-consulente-title { margin-bottom: 0; }
+  .riassunto-consulente-section.chiuso .riassunto-freccia { transform: rotate(-90deg); }
+  .riassunto-consulente-section.chiuso .table-wrap { display: none; }
   .riassunto-print-btn-wrap {
-    display: flex; justify-content: flex-end; margin-bottom: 20px;
+    display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; margin-bottom: 20px;
   }
 
   /* ===== STAMPA RIASSUNTO (@media print) ===== */
@@ -901,6 +922,10 @@
     #page-riassunto .section-wrap { padding: 10px 0 !important; max-width: 100% !important; }
     .riassunto-consulente-section { page-break-after: always; }
     .riassunto-consulente-section:last-child { page-break-after: avoid; }
+    /* La stampa riporta sempre tutti i consulenti, anche quelli chiusi a schermo */
+    .riassunto-consulente-section.chiuso .table-wrap { display: block !important; }
+    .riassunto-consulente-section.chiuso .riassunto-consulente-title { margin-bottom: 12px !important; }
+    .riassunto-freccia { display: none !important; }
     .table-wrap { box-shadow: none !important; border: 1px solid #ccc !important; width: 100% !important; }
     .table-scroll { overflow: visible !important; }
     table { min-width: unset !important; width: 100% !important; table-layout: fixed !important; }
@@ -2011,6 +2036,8 @@
       <button class="btn btn-primary" onclick="aggiungiBbcContatto()">+ Aggiungi contatto</button>
     </div>
 
+    <!-- Filtri + barra orizzontale restano agganciati sotto la navbar mentre si scorre la tabella -->
+    <div class="db-sticky-bar" id="dbStickyBar">
     <div class="filters-bar">
       <div class="filter-group" id="dbFiltroConsulenteWrap">
         <label class="filter-label">Consulente Assegnato</label>
@@ -2068,7 +2095,8 @@
       </div>
     </div>
 
-    <input type="range" id="dbScrollSlider" class="scroll-slider" min="0" max="0" value="0" step="1">
+    <input type="range" id="dbScrollSlider" class="scroll-slider" min="0" max="0" value="0" step="1" title="Scorri la tabella a destra / sinistra">
+    </div>
     <div class="table-wrap">
       <div class="table-scroll" id="dbTableScroll">
         <table id="tabellaDatabase">
@@ -2580,6 +2608,8 @@
       </div>
     </div>
     <div class="riassunto-print-btn-wrap">
+      <button class="btn btn-outline" onclick="apriChiudiTuttoRiassunto(true)">▸ Chiudi tutti</button>
+      <button class="btn btn-outline" onclick="apriChiudiTuttoRiassunto(false)">▾ Apri tutti</button>
       <button class="btn btn-outline" onclick="window.print()">🖨️ Stampa Riassunto</button>
     </div>
     <div id="riassuntoWrap"></div>
@@ -4247,6 +4277,11 @@ function aggiornaDbScrollSlider() {
     slider.addEventListener('input', () => { scrollEl.scrollLeft = Number(slider.value); });
     scrollEl.addEventListener('scroll', () => { slider.value = scrollEl.scrollLeft; });
     window.addEventListener('resize', setSliderRange);
+    // Ombra sotto la barra filtri solo quando è agganciata in alto (si capisce che la tabella le scorre sotto)
+    const barra = document.getElementById('dbStickyBar');
+    if (barra) window.addEventListener('scroll', () => {
+      barra.classList.toggle('is-stuck', window.scrollY > 0 && barra.getBoundingClientRect().top <= 61);
+    }, { passive: true });
   }
 }
 
@@ -4771,6 +4806,22 @@ function renderCruscottoBbc(s) {
 /* ===================== RIASSUNTO PER CONSULENTE ===================== */
 /* Pagina riservata a Super Admin e Direzione Vendite.
    Mostra un blocco per ogni consulente con tutti i suoi clienti assegnati, stampabile. */
+/* Sezioni del Riassunto chiuse dall'utente (chiave "cf|nome" o "bbc|titolo"):
+   restano chiuse anche quando il riassunto si ridisegna per un salvataggio di un collega */
+const riassuntoChiusi = new Set();
+function toggleRiassuntoConsulente(titoloEl) {
+  const sezione = titoloEl.closest('.riassunto-consulente-section');
+  const chiave = sezione.dataset.chiave;
+  const chiuso = sezione.classList.toggle('chiuso');
+  if (chiuso) riassuntoChiusi.add(chiave); else riassuntoChiusi.delete(chiave);
+}
+function apriChiudiTuttoRiassunto(chiudi) {
+  document.querySelectorAll('#riassuntoWrap .riassunto-consulente-section').forEach(sezione => {
+    sezione.classList.toggle('chiuso', chiudi);
+    if (chiudi) riassuntoChiusi.add(sezione.dataset.chiave); else riassuntoChiusi.delete(sezione.dataset.chiave);
+  });
+}
+
 function renderRiassunto() {
   if (!puoVedereRiassunto()) return;
   const wrap = document.getElementById('riassuntoWrap');
@@ -4789,8 +4840,9 @@ function renderRiassunto() {
     if (!righe.length) return;
 
     const totAttivi = righe.filter(c => c.clienteAttivo === true).length;
-    html += `<div class="riassunto-consulente-section">
-      <div class="riassunto-consulente-title">
+    html += `<div class="riassunto-consulente-section${riassuntoChiusi.has('cf|' + nome) ? ' chiuso' : ''}" data-chiave="${escapeHtml('cf|' + nome)}">
+      <div class="riassunto-consulente-title" onclick="toggleRiassuntoConsulente(this)" title="Clicca per aprire / chiudere">
+        <span class="riassunto-freccia">▾</span>
         👤 ${escapeHtml(nome)}
         <span style="font-weight:600; color:var(--testo-muted); font-size:0.85rem;">
           — ${righe.length} client${righe.length === 1 ? 'e' : 'i'}
@@ -4856,8 +4908,9 @@ function renderRiassuntoBbc(wrap) {
     const nLead = righe.length - nSoci;
     const nBackend = righe.filter(c => c.faseCliente === 'Back-End').length;
     const nAbb = righe.filter(c => c.faseCliente === 'Abbonamento').length;
-    html += `<div class="riassunto-consulente-section">
-      <div class="riassunto-consulente-title">
+    html += `<div class="riassunto-consulente-section${riassuntoChiusi.has('bbc|' + g.titolo) ? ' chiuso' : ''}" data-chiave="${escapeHtml('bbc|' + g.titolo)}">
+      <div class="riassunto-consulente-title" onclick="toggleRiassuntoConsulente(this)" title="Clicca per aprire / chiudere">
+        <span class="riassunto-freccia">▾</span>
         ${escapeHtml(g.titolo)}
         <span style="font-weight:600; color:var(--testo-muted); font-size:0.85rem;">
           — ${nLead} lead · ${nSoci} soc${nSoci === 1 ? 'io' : 'i'}
