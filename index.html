@@ -3471,25 +3471,56 @@ async function fetchJsonConFallback(url, fallback) {
   }
 }
 
+/* Elenco province e comuni per riconoscere la provincia di ogni contatto.
+   È separato dalla mappa: l'import del foglio all'avvio avviene PRIMA che la mappa venga aperta,
+   e senza questi dati ogni contatto restava senza provincia (filtro Provincia vuoto, niente numeri sulla mappa).
+   Viene scaricato una volta sola, anche se richiesto da più punti. */
+let _promessaDatiGeografici = null;
+function caricaDatiGeografici() {
+  if (!_promessaDatiGeografici) {
+    _promessaDatiGeografici = (async () => {
+      const [regionsData, provincesData] = await Promise.all([
+        fetchJsonConFallback(REGIONS_URL, REGIONS_URL_FALLBACK),
+        fetchJsonConFallback(PROVINCES_URL, PROVINCES_URL_FALLBACK)
+      ]);
+
+      allProvinceFeatures = provincesData.features;
+      allProvinceFeatures.forEach(f => {
+        provinceByNormName[normalizza(f.properties.prov_name)] = f;
+        regioneOfProvincia[f.properties.prov_name] = f.properties.reg_name;
+        provinceIstatByName[f.properties.prov_name] = f.properties.prov_istat_code_num;
+      });
+
+      (COMUNI_LOOKUP || []).forEach(c => {
+        const norm = normalizza(c[0]);
+        if (!comuneByNormName[norm]) comuneByNormName[norm] = [];
+        comuneByNormName[norm].push(c);
+        comuniSearchIndex.push({ norm, nome: c[0], prov: c[1] });
+      });
+      return regionsData;
+    })();
+    _promessaDatiGeografici.catch(() => { _promessaDatiGeografici = null; }); // in caso di errore si riprova alla prossima richiesta
+  }
+  return _promessaDatiGeografici;
+}
+
+/* Contatti salvati senza provincia riconosciuta (import fatto prima che l'elenco province fosse pronto):
+   la ricalcola in memoria dai campi Provincia/Comune, così filtri e mappa li contano subito. */
+function completaProvinceMancanti(lista) {
+  if (!allProvinceFeatures.length) return;
+  (lista || []).forEach(c => {
+    if (!c || c._provinciaMatch || !(c.provincia || c.comune)) return;
+    const comuneRisolto = c.comune ? risolviComune(c.comune, c.provincia) : null;
+    const provFeature = comuneRisolto ? risolviProvincia(comuneRisolto[1]) : risolviProvincia(c.provincia);
+    if (provFeature) c._provinciaMatch = provFeature.properties.prov_name;
+    if (comuneRisolto && !c._comuneMatch) c._comuneMatch = comuneRisolto[0];
+  });
+}
+
 async function initMappa() {
   map = L.map('map', { zoomControl: true, scrollWheelZoom: true }).setView([42.3, 12.6], 5.4);
 
-  const regionsData = await fetchJsonConFallback(REGIONS_URL, REGIONS_URL_FALLBACK);
-  const provincesData = await fetchJsonConFallback(PROVINCES_URL, PROVINCES_URL_FALLBACK);
-
-  allProvinceFeatures = provincesData.features;
-  allProvinceFeatures.forEach(f => {
-    provinceByNormName[normalizza(f.properties.prov_name)] = f;
-    regioneOfProvincia[f.properties.prov_name] = f.properties.reg_name;
-    provinceIstatByName[f.properties.prov_name] = f.properties.prov_istat_code_num;
-  });
-
-  (COMUNI_LOOKUP || []).forEach(c => {
-    const norm = normalizza(c[0]);
-    if (!comuneByNormName[norm]) comuneByNormName[norm] = [];
-    comuneByNormName[norm].push(c);
-    comuniSearchIndex.push({ norm, nome: c[0], prov: c[1] });
-  });
+  const regionsData = await caricaDatiGeografici();
 
   regionsLayer = L.geoJSON(regionsData, {
     style: () => ({ color: '#fff', weight: 1.5, fillColor: '#b3468d', fillOpacity: 0.55 }),
@@ -5110,6 +5141,12 @@ function impostaStatus(ok, testo) {
    faseCliente, ultimoContatto), replicando il comportamento di applicaOverlay().
    Rimuove anche i documenti di clienti non più presenti nel CSV importato. */
 async function elaboraTestoCsv(testo) {
+  // Senza l'elenco province ogni riga verrebbe salvata senza provincia riconosciuta
+  try { await caricaDatiGeografici(); }
+  catch (e) {
+    impostaStatus(false, 'Impossibile scaricare l\'elenco delle province: import annullato per non salvare contatti senza provincia. Riprova tra poco.');
+    return;
+  }
   const righe = parseCsv(testo);
   const righeGrezze = mappaRighe(righe);
 
@@ -5795,7 +5832,9 @@ async function eliminaContattoBbc(key) {
 }
 
 function getContattiCorrenti() {
-  return sezioneCorrente === 'bbc' ? bbcContatti : contatti;
+  const lista = sezioneCorrente === 'bbc' ? bbcContatti : contatti;
+  completaProvinceMancanti(lista);
+  return lista;
 }
 function getCollezioneCorrente() {
   return sezioneCorrente === 'bbc' ? CF_BBC_CLIENTI() : CF_CLIENTI();
@@ -7819,6 +7858,8 @@ async function avviaApp() {
   // calcolerebbe fitBounds su un contenitore 0x0, producendo una mappa vuota o mal posizionata.
   // Viene chiamata invece in selezionaSezione(), dopo che showPage('mappa') rende la pagina visibile.
   if (contatti.length > 0) aggiornaStatsBar();
+  // Elenco province scaricato subito (non serve la mappa visibile): filtro Provincia e conteggi lo usano
+  try { await caricaDatiGeografici(); } catch (e) { console.warn('[CF] Elenco province non disponibile:', e); }
   await loadOrganigramma();
   await loadBbcData();
   await loadBbcSoci();
